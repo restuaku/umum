@@ -1,3 +1,4 @@
+
 """
 SheerID Verification Logic (UNIVERSITY BOT VERSION)
 Handles the complete verification workflow with document upload

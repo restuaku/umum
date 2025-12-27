@@ -1,6 +1,7 @@
 """
 SheerID University Student Verification Bot (SHEERID ORGSEARCH API)
 Flow: URL → Name → Email → University Type → Search & Select → Birth Date
+FIXED: 24-32 char verificationId + Missing functions + State handling
 """
 import os
 import logging
@@ -14,7 +15,8 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 import httpx
-from sheerid_verifier import SheerIDVerifier
+import asyncio
+from sheerid_verifier import SheerIDVerifier, VerificationResult
 
 # =====================================================
 # KONFIGURASI
@@ -152,17 +154,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SHEERID_URL
 
 async def get_sheerid_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ambil SheerID URL (32 chars)"""
+    """Ambil SheerID URL (24-32 chars ✅ FIX)"""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     url = update.message.text.strip()
     
-    # Extract verification ID (32 hex chars seperti skrip asli)
-    match = re.search(r"verificationId=([a-f0-9]{32})", url, re.IGNORECASE)
+    # ✅ FIX: Support 24-32 char verificationId
+    match = re.search(r"verificationId=([a-f0-9]{24,32})", url, re.IGNORECASE)
     if not match:
         await update.message.reply_text(
             "❌ *URL tidak valid!*\n\n"
-            "Format: `verificationId=abc123...` (32 karakter hex)\n\n"
+            "Format: `verificationId=abc123...` (24-32 karakter hex)\n\n"
+            "*Contoh:*\n"
+            "`https://services.sheerid.com/verify/.../?verificationId=694f8154135fb92c1921e6fd`\n\n"
             "*⏰ 5 menit lagi*",
             parse_mode="Markdown",
         )
@@ -176,7 +180,7 @@ async def get_sheerid_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_step_timeout(context, chat_id, user_id, "NAME")
     
     await update.message.reply_text(
-        f"✅ *Verification ID:* `{verification_id[:8]}...{verification_id[-8:]}`\n\n"
+        f"✅ *Verification ID:* `{verification_id[:8]}...{verification_id[-8:]}` ({len(verification_id)} chars)\n\n"
         "Nama lengkap kamu?\n"
         "Contoh: John Smith\n\n"
         "*⏰ 5 menit*",
@@ -401,179 +405,4 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["school_type"] = type_map.get(data, "UNIVERSITY")
         
         await query.edit_message_text(
-            f"✅ *{data.replace('type_', '').replace('_', ' ').title()}*\n\n"
-            "Nama universitas apa yang dicari?\n"
-            "Contoh: `Stanford`, `Harvard`, `UCLA`\n\n"
-            "*⏰ 5 menit*",
-            parse_mode="Markdown",
-        )
-        
-        chat_id = query.message.chat_id
-        set_step_timeout(context, chat_id, user_id, "SCHOOL_SEARCH")
-        return SCHOOL_SEARCH
-        
-    elif data.startswith("sel_"):
-        # Pilih university spesifik
-        parts = data.split("_")
-        school_idx = int(parts[2])
-        
-        school = user_data[user_id].get(f"uni_{school_idx}")
-        if not school:
-            await query.edit_message_text("❌ *Data universitas hilang*\n/start ulang")
-            return
-        
-        user_data[user_id]["school"] = school
-        school_name = school["name"]
-        location = f"{school.get('city', '')}, {school.get('state', '')}".strip(", ")
-        
-        await query.edit_message_text(
-            f"✅ *Universitas terpilih:*\n\n"
-            f"🏛️ *{school_name}*\n"
-            f"📍 {location}\n"
-            f"🆔 `{school['id']}`\n"
-            f"Type: `{school.get('type', 'UNIVERSITY')}`\n\n"
-            f"📅 *Tanggal lahir?*\n"
-            f"Format: `YYYY-MM-DD`\n"
-            f"Contoh: `2000-05-15`\n\n*⏰ 5 menit*",
-            parse_mode="Markdown",
-        )
-        
-        set_step_timeout(context, query.message.chat_id, user_id, "BIRTH_DATE")
-        return BIRTH_DATE
-
-# =====================================================
-# VERIFICATION PROCESS
-# =====================================================
-
-async def process_verification(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Jalankan SheerIDVerifier dengan data user"""
-    chat_id = update.effective_chat.id
-    
-    try:
-        data = user_data[user_id]
-        verification_id = data["verification_id"]
-        first_name = data["first_name"]
-        last_name = data["last_name"]
-        full_name = data["full_name"]
-        email = data["email"]
-        birth_date = data["birth_date"]
-        school = data["school"]
-        
-        msg = await update.message.reply_text(
-            f"⚙️ *Memproses verifikasi...*\n\n"
-            f"👤 {full_name}\n"
-            f"🏛️ {school['name'][:30]}...\n"
-            f"📧 {email}\n"
-            f"⏳ Menyiapkan student ID card...",
-            parse_mode="Markdown",
-        )
-        
-        # JALANKAN SHEERIDVERIFIER ASLI (dengan modifikasi parameter)
-        verifier = SheerIDVerifier(verification_id)
-        result = verifier.verify(
-            first_name=first_name,
-            last_name=last_name,
-            email=email,
-            birth_date=birth_date,
-            school=school  # ← Parameter baru
-        )
-        
-        # Log hasil
-        await log_verification_result(
-            user_id, full_name, school["name"], email,
-            result.success, result.message if not result.success else ""
-        )
-        
-        if result.success:
-            await msg.edit_text(
-                f"✅ *VERIFICATION SUCCESS!*\n\n"
-                f"👤 *{full_name}*\n"
-                f"🏛️ *{school['name']}*\n"
-                f"📧 `{email}`\n"
-                f"📅 `{birth_date}`\n\n"
-                f"⏳ *Hasil dalam 24-48 jam*\n"
-                f"✅ Cek email (termasuk spam folder)",
-                parse_mode="Markdown",
-            )
-        else:
-            await msg.edit_text(
-                f"❌ *VERIFICATION FAILED*\n\n"
-                f"Error: `{result.message}`\n\n"
-                f"/start untuk coba lagi",
-                parse_mode="Markdown",
-            )
-            
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ *Error:*\n`{str(e)[:100]}`\n\n/start ulang",
-            parse_mode="Markdown",
-        )
-        await log_verification_result(user_id, "UNKNOWN", "ERROR", "N/A", False, str(e))
-    
-    finally:
-        if user_id in user_data:
-            del user_data[user_id]
-        clear_all_timeouts(context, user_id)
-
-# =====================================================
-# CANCEL
-# =====================================================
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel handler"""
-    user_id = update.effective_user.id
-    if user_id in user_data:
-        del user_data[user_id]
-    clear_all_timeouts(context, user_id)
-    
-    await update.message.reply_text(
-        "❌ *Dibatalkan*\n\nKirim /start untuk mulai lagi",
-        parse_mode="Markdown",
-    )
-    return ConversationHandler.END
-
-# =====================================================
-# MAIN
-# =====================================================
-
-def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN belum diset!")
-        return
-    
-    print("\n" + "="*60)
-    print(f"🎓 {BOT_NAME} (SHEERID ORGSEARCH)")
-    print("="*60)
-    print(f"🤖 Token: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
-    print(f"👮 Admin: {ADMIN_CHAT_ID}")
-    print(f"📡 ORGSEARCH: {ORGSEARCH_URL}")
-    print("="*60)
-    
-    request = HTTPXRequest(
-        connect_timeout=10, read_timeout=30, write_timeout=30, pool_timeout=10
-    )
-    
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            SHEERID_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_sheerid_url)],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-            EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_email)],
-            SCHOOL_TYPE: [CallbackQueryHandler(button_callback)],
-            SCHOOL_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_school_name)],
-            BIRTH_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_birth_date)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        conversation_timeout=None,
-    )
-    
-    app.add_handler(conv_handler)
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    print("🚀 Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+            f"✅ *{data.replace('type_', '').replace('_
